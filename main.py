@@ -14,16 +14,16 @@ from discord.ext import commands
 # CONFIGURATION
 # ============================================================
 
-# Parse tokens from environment variable (comma-separated)
+# Parse tokens from environment variable (comma-separated bot tokens)
 TOKENS_ENV = os.environ.get("TOKENS", "")
 if not TOKENS_ENV.strip():
     print("[FATAL] TOKENS environment variable is empty or not set!")
     print("[FATAL] Please set TOKENS in your Render environment variables.")
-    print("[FATAL] Example: TOKENS=token1,token2,token3")
+    print("[FATAL] Example: TOKENS=bot_token_1,bot_token_2,bot_token_3")
     sys.exit(1)
 
 TOKENS = [t.strip() for t in TOKENS_ENV.split(",") if t.strip()]
-print(f"[INFO] Loaded {len(TOKENS)} token(s) from environment.")
+print(f"[INFO] Loaded {len(TOKENS)} bot token(s) from environment.")
 
 # Parse primary owners (comma-separated user IDs)
 PRIMARY_OWNERS_ENV = os.environ.get("PRIMARY_OWNERS", "")
@@ -65,7 +65,7 @@ muted_users = {}       # bot_index -> set of user IDs
 def is_allowed_channel(channel_id):
     """Check if a channel is in the allowed whitelist."""
     if not ALLOWED_CHANNELS:
-        return True  # No whitelist = all channels allowed
+        return True
     return channel_id in ALLOWED_CHANNELS
 
 def is_primary_owner(user_id):
@@ -88,7 +88,7 @@ def get_embed(title, description, color=discord.Color.blue()):
 
 def make_bot(token, bot_index):
     intents = discord.Intents.all()
-    bot = commands.Bot(command_prefix="!", intents=intents, self_bot=True)
+    bot = commands.Bot(command_prefix="!", intents=intents)
     
     # Initialize state for this bot
     secondary_owners[bot_index] = set()
@@ -104,10 +104,8 @@ def make_bot(token, bot_index):
     @bot.event
     async def on_ready():
         print(f"[✓] Bot {bot_index} logged in as {bot.user} (ID: {bot.user.id})")
-        try:
-            await bot.user.edit(status=discord.Status.online)
-        except:
-            pass
+        # Set bot status
+        await bot.change_presence(status=discord.Status.online)
 
     @bot.event
     async def on_message(message):
@@ -117,7 +115,7 @@ def make_bot(token, bot_index):
 
         # Channel whitelist check
         if not is_allowed_channel(message.channel.id):
-            return  # Silently ignore
+            return
 
         await bot.process_commands(message)
 
@@ -135,11 +133,11 @@ def make_bot(token, bot_index):
 
         help_text = """
 **📨 DM Commands**
-`!dmspam <user_id> <message> [delay=1]` — Start DM spam
+`!dmspam <user_id> <message>` — Start DM spam
 `!dmspamstop` — Stop DM spam
 
 **💬 Channel Commands**
-`!spam <channel_id> <message> [delay=1]` — Start channel spam
+`!spam <channel_id> <message>` — Start channel spam
 `!stopspam` — Stop channel spam
 
 **🔊 Voice Commands**
@@ -186,8 +184,7 @@ def make_bot(token, bot_index):
             "target_id": target_id,
             "message": message,
             "delay": delay,
-            "stop_flag": stop_flag,
-            "ctx": ctx
+            "stop_flag": stop_flag
         }
 
         await ctx.send(embed=get_embed("✅ **DM Spam Started**", f"Target: `{target_id}`\nDelay: `{delay}s`\nMessage: `{message[:50]}...`", discord.Color.green()))
@@ -197,6 +194,9 @@ def make_bot(token, bot_index):
             while not stop_flag.is_set():
                 try:
                     await user.send(message)
+                except discord.Forbidden:
+                    await ctx.send(embed=get_embed("⚠️ DM Error", "Cannot DM this user (DMs closed or blocked).", discord.Color.orange()))
+                    break
                 except Exception as e:
                     await ctx.send(embed=get_embed("⚠️ DM Error", f"Failed to send DM: {str(e)}", discord.Color.orange()))
                     break
@@ -256,6 +256,9 @@ def make_bot(token, bot_index):
             while not stop_flag.is_set():
                 try:
                     await channel.send(message)
+                except discord.Forbidden:
+                    await ctx.send(embed=get_embed("⚠️ Channel Error", "Missing permissions to send messages in that channel.", discord.Color.orange()))
+                    break
                 except Exception as e:
                     await ctx.send(embed=get_embed("⚠️ Channel Error", f"Failed to send: {str(e)}", discord.Color.orange()))
                     break
@@ -285,11 +288,15 @@ def make_bot(token, bot_index):
             await ctx.send(embed=get_embed("❌ Access Denied", "You are not an owner.", discord.Color.red()))
             return
 
+        if not ctx.guild:
+            await ctx.send(embed=get_embed("❌ Error", "This command must be used in a server.", discord.Color.red()))
+            return
+
         stop_flag = threading.Event()
         fuckvc_active[bot_index] = {
             "vc_id": vc_id,
-            "stop_flag": stop_flag,
-            "guild_id": ctx.guild.id if ctx.guild else None
+            "guild_id": ctx.guild.id,
+            "stop_flag": stop_flag
         }
 
         await ctx.send(embed=get_embed("🔊 **VC Fuck Started**", f"VC ID: `{vc_id}`", discord.Color.green()))
@@ -297,19 +304,14 @@ def make_bot(token, bot_index):
         async def vc_loop():
             while not stop_flag.is_set():
                 try:
-                    vc = await bot.fetch_channel(vc_id)
-                    if hasattr(vc, 'connect'):
-                        await vc.connect()
+                    vc_channel = bot.get_channel(vc_id)
+                    if vc_channel and hasattr(vc_channel, 'connect'):
+                        vc_conn = await vc_channel.connect()
+                        stop_flag.wait(random.uniform(1, 3))
+                        await vc_conn.disconnect(force=True)
                 except:
                     pass
-                stop_flag.wait(0.5)
-                # Leave and reconnect to cause chaos
-                for vc_conn in bot.voice_clients:
-                    try:
-                        await vc_conn.disconnect(force=True)
-                    except:
-                        pass
-                stop_flag.wait(0.5)
+                stop_flag.wait(random.uniform(1, 3))
 
         asyncio.ensure_future(vc_loop())
 
@@ -325,7 +327,6 @@ def make_bot(token, bot_index):
             return
         fuckvc_active[bot_index]["stop_flag"].set()
         fuckvc_active[bot_index] = None
-        # Disconnect all voice clients
         for vc in bot.voice_clients:
             try:
                 await vc.disconnect(force=True)
@@ -340,6 +341,9 @@ def make_bot(token, bot_index):
         if not is_owner(bot_index, ctx.author.id):
             await ctx.send(embed=get_embed("❌ Access Denied", "You are not an owner.", discord.Color.red()))
             return
+        if not ctx.guild:
+            await ctx.send(embed=get_embed("❌ Error", "This command must be used in a server.", discord.Color.red()))
+            return
         try:
             deleted = await ctx.channel.purge(limit=min(amount, 100))
             await ctx.send(embed=get_embed("🗑️ **Messages Deleted**", f"Deleted `{len(deleted)}` messages.", discord.Color.green()))
@@ -353,7 +357,7 @@ def make_bot(token, bot_index):
         if not is_owner(bot_index, ctx.author.id):
             await ctx.send(embed=get_embed("❌ Access Denied", "You are not an owner.", discord.Color.red()))
             return
-        if ctx.guild is None:
+        if not ctx.guild:
             await ctx.send(embed=get_embed("❌ Error", "This command must be used in a server.", discord.Color.red()))
             return
         try:
@@ -370,7 +374,7 @@ def make_bot(token, bot_index):
         if not is_owner(bot_index, ctx.author.id):
             await ctx.send(embed=get_embed("❌ Access Denied", "You are not an owner.", discord.Color.red()))
             return
-        if ctx.guild is None:
+        if not ctx.guild:
             await ctx.send(embed=get_embed("❌ Error", "This command must be used in a server.", discord.Color.red()))
             return
         try:
@@ -388,7 +392,7 @@ def make_bot(token, bot_index):
         if not is_owner(bot_index, ctx.author.id):
             await ctx.send(embed=get_embed("❌ Access Denied", "You are not an owner.", discord.Color.red()))
             return
-        # Add to muted set - this is tracked but actual mute may need role-based setup
+        # Add to muted set
         muted_users[bot_index].add(user_id)
         await ctx.send(embed=get_embed("🔇 **User Muted**", f"Muted `{user_id}`", discord.Color.green()))
 
@@ -492,7 +496,6 @@ async def main():
     
     print(f"[✓] All bots initialized. Starting login...")
     
-    # Run all bots concurrently
     await asyncio.gather(*[bot.start(token) for bot, token in bots])
 
 if __name__ == "__main__":
